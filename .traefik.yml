@@ -1,7 +1,7 @@
 displayName: JWT Middleware
 type: middleware
 import: github.com/numaga94/traefik-jwt-middleware
-summary: 'Verify JWT Token in auth header'
+summary: 'Verify JWT Token in auth header for a specified paths'
 
 testData:
   encodedHeader:

@@ -12,10 +12,11 @@ import (
 )
 
 type Config struct {
-	Secret       string `json:"secret,omitempty"`
-	AllowedRoles string `json:"allowed_roles,omitempty"`
-	AuthHeader   string `json:"authHeader,omitempty"`
-	HeaderPrefix string `json:"headerPrefix,omitempty"`
+	Secret           string `json:"secret,omitempty"`
+	AllowedRoles     string `json:"allowedRoles,omitempty"`
+	PathsToBeChecked string `json:"pathsToBeChecked,omitempty"`
+	AuthHeader       string `json:"authHeader,omitempty"`
+	HeaderPrefix     string `json:"headerPrefix,omitempty"`
 }
 
 func CreateConfig() *Config {
@@ -23,12 +24,13 @@ func CreateConfig() *Config {
 }
 
 type JWT struct {
-	next         http.Handler
-	name         string
-	secret       string
-	allowedRoles []string
-	authHeader   string
-	headerPrefix string
+	next             http.Handler
+	name             string
+	secret           string
+	allowedRoles     []string
+	pathsToBeChecked []string
+	authHeader       string
+	headerPrefix     string
 }
 
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
@@ -38,6 +40,9 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	if len(config.AllowedRoles) == 0 {
 		config.AllowedRoles = "super,admin,staff"
 	}
+	if len(config.PathsToBeChecked) == 0 {
+		config.PathsToBeChecked = "/static/document/, /static/file/, /static/staff/"
+	}
 	if len(config.AuthHeader) == 0 {
 		config.AuthHeader = "Authorization"
 	}
@@ -46,17 +51,33 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	}
 
 	return &JWT{
-		next:         next,
-		name:         name,
-		secret:       config.Secret,
-		allowedRoles: strings.Split(config.AllowedRoles, ","),
-		authHeader:   config.AuthHeader,
-		headerPrefix: config.HeaderPrefix,
+		next:             next,
+		name:             name,
+		secret:           config.Secret,
+		allowedRoles:     strings.Split(config.AllowedRoles, ","),
+		pathsToBeChecked: strings.Split(config.PathsToBeChecked, ","),
+		authHeader:       config.AuthHeader,
+		headerPrefix:     config.HeaderPrefix,
 	}, nil
 }
 
 func (j *JWT) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	headerToken := req.Header.Get(j.authHeader)
+
+	// a helper function to check if the current path is in the scope of paths to be checked
+	pathShouldBeChecked := func() bool {
+		path := req.URL.Path
+		for _, p := range j.pathsToBeChecked {
+			if strings.Contains(path, p) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !pathShouldBeChecked() {
+		j.next.ServeHTTP(res, req)
+	}
 
 	if len(headerToken) == 0 {
 		http.Error(res, "Request error", http.StatusUnauthorized)
@@ -77,7 +98,7 @@ func (j *JWT) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// Token Deconstructed header token
+// ~ custom claims struct
 type CustomClaims struct {
 	jwt.RegisteredClaims
 	Username string `json:"username"`
