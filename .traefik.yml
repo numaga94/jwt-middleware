@@ -1,8 +1,8 @@
 displayName: JWT Middleware
 type: middleware
-import: github.com/23deg/jwt-middleware
-summary: 'Verify JWT Token in auth header and injects decoded payload in header'
+import: github.com/numaga94/traefik-jwt-middleware
+summary: 'Verify JWT Token in auth header'
 
 testData:
   encodedHeader:
-    - "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ._XEngvIuxOcA-j7y_upRUbXli4DLToNf7HxH1XNmxSc"
+    - 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ._XEngvIuxOcA-j7y_upRUbXli4DLToNf7HxH1XNmxSc'
