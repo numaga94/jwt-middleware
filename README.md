@@ -4,15 +4,21 @@ JWT Middleware is a middleware plugin for [Traefik](https://github.com/containou
 
 ## Configuration
 
-Start with command
+1. Add this snippet in the Traefik Static Configuration:
 
 ```yaml
+experimental:
+  plugins:
+    jwt-middleware:
+      moduleName: 'github.com/numaga94/jwt-middleware'
+      version: 'v0.0.4'
+
 command:
   - '--experimental.plugins.jwt-middleware.modulename=github.com/numaga94/jwt-middleware'
-  - '--experimental.plugins.jwt-middleware.version=v0.0.3'
+  - '--experimental.plugins.jwt-middleware.version=v0.0.4'
 ```
 
-Activate plugin in your config
+2. Configure the plugin using the Dynamic Configuration.
 
 ```yaml
 http:
@@ -24,6 +30,8 @@ http:
           allowedRoles: `super,admin,staff`
           authHeader: Authorization
           headerPrefix: Bearer
+          encodedHeader: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ._XEngvIuxOcA-j7y_upRUbXli4DLToNf7HxH1XNmxSc
+
 ```
 
 Use as docker-compose label
