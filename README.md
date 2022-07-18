@@ -8,7 +8,7 @@ Start with command
 
 ```yaml
 command:
-  - '--experimental.plugins.jwt-middleware.modulename=github.com/numaga94/traefik-jwt-middleware'
+  - '--experimental.plugins.jwt-middleware.modulename=github.com/numaga94/jwt-middleware'
   - '--experimental.plugins.jwt-middleware.version=v0.0.2'
 ```
 
@@ -21,7 +21,7 @@ http:
       plugin:
         jwt-middleware:
           secret: SECRET
-          proxyHeaderName: injectedPayload
+          allowedRoles: `super,admin,staff`
           authHeader: Authorization
           headerPrefix: Bearer
 ```

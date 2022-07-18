@@ -2,43 +2,41 @@ package jwt_middleware
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 	"net/http"
+	"strings"
+	"time"
 
-	"encoding/base64"
-	"crypto/hmac"
-	"crypto/sha256"
+	"github.com/golang-jwt/jwt/v4"
 )
 
 type Config struct {
-	Secret string `json:"secret,omitempty"`
-	ProxyHeaderName string `json:"proxyHeaderName,omitempty"`
-	AuthHeader string `json:"authHeader,omitempty"`
+	Secret       string `json:"secret,omitempty"`
+	AllowedRoles string `json:"allowed_roles,omitempty"`
+	AuthHeader   string `json:"authHeader,omitempty"`
 	HeaderPrefix string `json:"headerPrefix,omitempty"`
 }
-
 
 func CreateConfig() *Config {
 	return &Config{}
 }
 
 type JWT struct {
-	next						http.Handler
-	name						string
-	secret					string
-	proxyHeaderName string
-	authHeader 			string
-	headerPrefix		string
+	next         http.Handler
+	name         string
+	secret       string
+	allowedRoles []string
+	authHeader   string
+	headerPrefix string
 }
 
 func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
-
 	if len(config.Secret) == 0 {
 		config.Secret = "SECRET"
 	}
-	if len(config.ProxyHeaderName) == 0 {
-		config.ProxyHeaderName = "injectedPayload"
+	if len(config.AllowedRoles) == 0 {
+		config.AllowedRoles = "super,admin,staff"
 	}
 	if len(config.AuthHeader) == 0 {
 		config.AuthHeader = "Authorization"
@@ -48,11 +46,11 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	}
 
 	return &JWT{
-		next:		next,
-		name:		name,
-		secret:	config.Secret,
-		proxyHeaderName: config.ProxyHeaderName,
-		authHeader: config.AuthHeader,
+		next:         next,
+		name:         name,
+		secret:       config.Secret,
+		allowedRoles: strings.Split(config.AllowedRoles, ","),
+		authHeader:   config.AuthHeader,
 		headerPrefix: config.HeaderPrefix,
 	}, nil
 }
@@ -64,32 +62,15 @@ func (j *JWT) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		http.Error(res, "Request error", http.StatusUnauthorized)
 		return
 	}
-	
-	token, preprocessError  := preprocessJWT(headerToken, j.headerPrefix)
-	if preprocessError != nil {
+
+	token, err := getRawToken(headerToken, j.headerPrefix)
+	if err != nil {
 		http.Error(res, "Request error", http.StatusBadRequest)
 		return
 	}
-	
-	verified, verificationError := verifyJWT(token, j.secret)
-	if verificationError != nil {
-		http.Error(res, "Not allowed", http.StatusUnauthorized)
-		return
-	}
 
-	if (verified) {
-		// If true decode payload
-		payload, decodeErr := decodeBase64(token.payload)
-		if decodeErr != nil {
-			http.Error(res, "Request error", http.StatusBadRequest)
-			return
-		}
-
-		// TODO Check for outside of ASCII range characters
-		
-		// Inject header as proxypayload or configured name
-		req.Header.Add(j.proxyHeaderName, payload)
-		fmt.Println(req.Header)
+	_, _, ok := VerifyToken(token, j.secret, j.allowedRoles)
+	if ok {
 		j.next.ServeHTTP(res, req)
 	} else {
 		http.Error(res, "Not allowed", http.StatusUnauthorized)
@@ -97,61 +78,75 @@ func (j *JWT) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 }
 
 // Token Deconstructed header token
-type Token struct {
-	header string
-	payload string
-	verification string
+type CustomClaims struct {
+	jwt.RegisteredClaims
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Avatar   string `json:"avatar"`
+	Role     string `json:"role"`
 }
 
-// verifyJWT Verifies jwt token with secret
-func verifyJWT(token Token, secret string) (bool, error) {
-	mac := hmac.New(sha256.New, []byte(secret))
-	message := token.header + "." + token.payload
-	mac.Write([]byte(message))
-	expectedMAC := mac.Sum(nil)
-	
-	decodedVerification, errDecode := base64.RawURLEncoding.DecodeString(token.verification)
-	if errDecode != nil {
-		return false, errDecode
+// * a helper func to check the validity of the token
+// @params: tokenString a string, the token
+// @params: audience a string, the type of token including "activationToken", "accessToken", or others
+// @params: allowedRoles an []string, who the token is being authorized to
+func VerifyToken(tokenString, accessPublicKey string, allowedRoles []string) (*jwt.Token, *CustomClaims, bool) {
+	//  ~ parsing token string
+	token, err := jwt.ParseWithClaims(tokenString, &CustomClaims{}, func(token *jwt.Token) (interface{}, error) {
+		publicKey, err := jwt.ParseEdPublicKeyFromPEM([]byte(accessPublicKey))
+		if err != nil {
+			return nil, errors.New("failed to parse ACCESS key")
+		}
+
+		// ~ verify the ed25519 token
+		parts := strings.Split(tokenString, ".")
+		if err = jwt.GetSigningMethod("EdDSA").Verify(strings.Join(parts[0:2], "."), parts[2], publicKey); err != nil {
+			return nil, err
+		}
+		return publicKey, nil
+	})
+	// ? if parse token returns err then the token isn't a valid one
+	if err != nil {
+		ver, ok := err.(*jwt.ValidationError)
+		if ok && errors.Is(ver.Inner, errors.New("token has expired")) {
+			return nil, nil, false
+		}
+		return nil, nil, false
+	}
+	// ~ parse the claims
+	claims, ok := token.Claims.(*CustomClaims)
+
+	// ? check if both token and claims are valid
+	if token.Valid && ok && validateClaims(claims) {
+		// ? only the role in claims matches allowed roles, we return the token and claims
+		for _, v := range allowedRoles {
+			if v == claims.Role {
+				return token, claims, true
+			}
+		}
 	}
 
-	if hmac.Equal(decodedVerification, expectedMAC) {
-		return true, nil
-	}
-	return false, nil
-	// TODO Add time check to jwt verification
+	// ? if the token or claims aren't valid
+	// fmt.Println(claims, ok, token.Valid)
+	return nil, nil, false
 }
 
-// preprocessJWT Takes the request header string, strips prefix and whitespaces and returns a Token
-func preprocessJWT(reqHeader string, prefix string) (Token, error) {
-	// fmt.Println("==> [processHeader] SplitAfter")
-	// structuredHeader := strings.SplitAfter(reqHeader, "Bearer ")[1]
-	cleanedString := strings.TrimPrefix(reqHeader, prefix)
-	cleanedString = strings.TrimSpace(cleanedString)
-	// fmt.Println("<== [processHeader] SplitAfter", cleanedString)
-
-	var token Token
-
-	tokenSplit := strings.Split(cleanedString, ".")
-
-	if len(tokenSplit) != 3 {
-		return token, fmt.Errorf("Invalid token")
+// * helper function to validate claims by its time values
+func validateClaims(claims *CustomClaims) bool {
+	if claims.VerifyAudience("access_token", true) && claims.VerifyIssuer("uparis.org", true) && claims.VerifyExpiresAt(time.Now().UTC(), true) && claims.VerifyIssuedAt(time.Now().UTC(), true) && claims.VerifyNotBefore(time.Now().UTC(), true) {
+		return true
 	}
-
-	token.header = tokenSplit[0]
-	token.payload = tokenSplit[1]
-	token.verification = tokenSplit[2]
-
-	return token, nil
+	fmt.Println("error on validating claims")
+	return false
 }
 
-// decodeBase64 Decode base64 to string
-func decodeBase64(baseString string) (string, error) {
-	byte, decodeErr := base64.RawURLEncoding.DecodeString(baseString)
-	if decodeErr != nil {
-		return baseString, fmt.Errorf("Error decoding")
+// getRawToken Takes the request header string, strips prefix and whitespaces and returns a raw token string
+func getRawToken(reqHeader string, prefix string) (tokenString string, err error) {
+	tokenString = strings.TrimPrefix(reqHeader, prefix)
+	tokenString = strings.TrimSpace(tokenString)
+
+	if tokenString == "" {
+		return tokenString, errors.New("parse raw token failed")
 	}
-	return string(byte), nil
+	return tokenString, nil
 }
-
-
