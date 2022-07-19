@@ -14,6 +14,9 @@ gin-bin
 # Test binary, built with `go test -c`
 *.test
 
+# test file
+*_test.go
+
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 

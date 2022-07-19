@@ -2,13 +2,16 @@ package jwt_middleware
 
 import (
 	"context"
+	"crypto"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/golang-jwt/jwt/v4"
 )
 
 type Config struct {
@@ -62,22 +65,13 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 }
 
 func (j *JWT) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	headerToken := req.Header.Get(j.authHeader)
-
 	// a helper function to check if the current path is in the scope of paths to be checked
-	pathShouldBeChecked := func() bool {
-		path := req.URL.Path
-		for _, p := range j.pathsToBeChecked {
-			if strings.Contains(path, p) {
-				return true
-			}
-		}
-		return false
-	}
-
-	if !pathShouldBeChecked() {
+	path := req.URL.Path
+	if !pathShouldBeChecked(path, j.pathsToBeChecked) {
 		j.next.ServeHTTP(res, req)
 	}
+
+	headerToken := req.Header.Get(j.authHeader)
 
 	if len(headerToken) == 0 {
 		http.Error(res, "Request error", http.StatusUnauthorized)
@@ -90,75 +84,101 @@ func (j *JWT) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	_, _, ok := VerifyToken(token, j.secret, j.allowedRoles)
-	if ok {
-		j.next.ServeHTTP(res, req)
-	} else {
+	if err := VerifyToken(token, j.secret, j.allowedRoles); err != nil {
 		http.Error(res, "Not allowed", http.StatusUnauthorized)
+	} else {
+		j.next.ServeHTTP(res, req)
 	}
+}
+
+func pathShouldBeChecked(path string, paths []string) bool {
+	for _, p := range paths {
+		if strings.Contains(path, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // ~ custom claims struct
-type CustomClaims struct {
-	jwt.RegisteredClaims
-	Username string `json:"username"`
-	Email    string `json:"email"`
-	Avatar   string `json:"avatar"`
-	Role     string `json:"role"`
+type Claims struct {
+	Issuer    string     `json:"iss,omitempty"`
+	Subject   string     `json:"sub,omitempty"`
+	Audience  []string   `json:"aud,omitempty"`
+	ExpiresAt *time.Time `json:"exp,omitempty"`
+	NotBefore *time.Time `json:"nbf,omitempty"`
+	IssuedAt  *time.Time `json:"iat,omitempty"`
+	ID        string     `json:"jti,omitempty"`
+	Username  string     `json:"username"`
+	Email     string     `json:"email"`
+	Avatar    string     `json:"avatar"`
+	Role      string     `json:"role"`
 }
 
-// * a helper func to check the validity of the token
-// @params: tokenString a string, the token
-// @params: audience a string, the type of token including "activationToken", "accessToken", or others
-// @params: allowedRoles an []string, who the token is being authorized to
-func VerifyToken(tokenString, accessPublicKey string, allowedRoles []string) (*jwt.Token, *CustomClaims, bool) {
-	//  ~ parsing token string
-	token, err := jwt.ParseWithClaims(tokenString, &CustomClaims{}, func(token *jwt.Token) (interface{}, error) {
-		publicKey, err := jwt.ParseEdPublicKeyFromPEM([]byte(accessPublicKey))
-		if err != nil {
-			return nil, errors.New("failed to parse ACCESS key")
+func (c *Claims) VerifyAudience(expected string) bool {
+	for _, v := range c.Audience {
+		if strings.TrimSpace(strings.ToLower(expected)) == strings.TrimSpace(strings.ToLower(v)) {
+			return true
 		}
-
-		// ~ verify the ed25519 token
-		parts := strings.Split(tokenString, ".")
-		if err = jwt.GetSigningMethod("EdDSA").Verify(strings.Join(parts[0:2], "."), parts[2], publicKey); err != nil {
-			return nil, err
-		}
-		return publicKey, nil
-	})
-	// ? if parse token returns err then the token isn't a valid one
-	if err != nil {
-		ver, ok := err.(*jwt.ValidationError)
-		if ok && errors.Is(ver.Inner, errors.New("token has expired")) {
-			return nil, nil, false
-		}
-		return nil, nil, false
 	}
+	return false
+}
+
+func (c *Claims) VerifyIssuer(expected string) bool {
+	return strings.TrimSpace(strings.ToLower(expected)) == strings.TrimSpace(strings.ToLower(c.Issuer))
+}
+
+func (c *Claims) VerifyExpiresAt() bool {
+	return c.ExpiresAt.After(time.Now())
+}
+
+func (c *Claims) VerifyIssuedAt() bool {
+	return c.IssuedAt.After(time.Now())
+}
+
+func (c *Claims) VerifyNotBefore() bool {
+	return c.NotBefore.After(time.Now())
+}
+
+func VerifyToken(tokenString, accessPublicKey string, allowedRoles []string) error {
+	//  ~ parse EdPublic key from PEM
+	publicKey, err := ParseEdPublicKeyFromPEM([]byte(accessPublicKey))
+	if err != nil {
+		return err
+	}
+	// ~ verify the ed25519 token
+	parts := strings.Split(tokenString, ".")
+	if err := Verify(strings.Join(parts[0:2], "."), parts[2], publicKey); err != nil {
+		return err
+	}
+
 	// ~ parse the claims
-	claims, ok := token.Claims.(*CustomClaims)
+	claims, err := ParseClaims(parts[1])
+	if err != nil {
+		return err
+	}
 
 	// ? check if both token and claims are valid
-	if token.Valid && ok && validateClaims(claims) {
-		// ? only the role in claims matches allowed roles, we return the token and claims
-		for _, v := range allowedRoles {
-			if v == claims.Role {
-				return token, claims, true
-			}
+	if err := validateClaims(claims); err != nil {
+		return err
+	}
+
+	// ? only the role in claims matches allowed roles, we return the token and claims
+	for _, v := range allowedRoles {
+		if v == claims.Role {
+			return nil
 		}
 	}
 
-	// ? if the token or claims aren't valid
-	// fmt.Println(claims, ok, token.Valid)
-	return nil, nil, false
+	return errors.New("user roles is out of authorized scope")
 }
 
 // * helper function to validate claims by its time values
-func validateClaims(claims *CustomClaims) bool {
-	if claims.VerifyAudience("access_token", true) && claims.VerifyIssuer("uparis.org", true) && claims.VerifyExpiresAt(time.Now().UTC(), true) && claims.VerifyIssuedAt(time.Now().UTC(), true) && claims.VerifyNotBefore(time.Now().UTC(), true) {
-		return true
+func validateClaims(claims Claims) error {
+	if claims.VerifyAudience("access_token") && claims.VerifyIssuer("uparis.org") && claims.VerifyExpiresAt() && claims.VerifyIssuedAt() && claims.VerifyNotBefore() {
+		return nil
 	}
-	fmt.Println("error on validating claims")
-	return false
+	return errors.New("claims not valid")
 }
 
 // getRawToken Takes the request header string, strips prefix and whitespaces and returns a raw token string
@@ -170,4 +190,74 @@ func getRawToken(reqHeader string, prefix string) (tokenString string, err error
 		return tokenString, errors.New("parse raw token failed")
 	}
 	return tokenString, nil
+}
+
+// Verify implements token verification for the SigningMethod.
+// For this verify method, key must be an ed25519.PublicKey
+func Verify(signingString, signature string, key interface{}) error {
+	var err error
+	var ed25519Key ed25519.PublicKey
+	var ok bool
+
+	if ed25519Key, ok = key.(ed25519.PublicKey); !ok {
+		return errors.New("invalid key type")
+	}
+
+	if len(ed25519Key) != ed25519.PublicKeySize {
+		return errors.New("invalid key")
+	}
+
+	// Decode the signature
+	var sig []byte
+	if sig, err = DecodeSegment(signature); err != nil {
+		return err
+	}
+
+	// Verify the signature
+	if !ed25519.Verify(ed25519Key, []byte(signingString), sig) {
+		return errors.New("ed25519 verification failed")
+	}
+
+	return nil
+}
+
+// ParseEdPublicKeyFromPEM parses a PEM-encoded Edwards curve public key
+func ParseEdPublicKeyFromPEM(key []byte) (crypto.PublicKey, error) {
+	var err error
+
+	// Parse PEM block
+	var block *pem.Block
+	if block, _ = pem.Decode(key); block == nil {
+		return nil, errors.New("key must be PEM encoded")
+	}
+
+	// Parse the key
+	var parsedKey interface{}
+	if parsedKey, err = x509.ParsePKIXPublicKey(block.Bytes); err != nil {
+		return nil, err
+	}
+
+	var pkey ed25519.PublicKey
+	var ok bool
+	if pkey, ok = parsedKey.(ed25519.PublicKey); !ok {
+		return nil, errors.New("key is not a valid Ed25519 public key")
+	}
+
+	return pkey, nil
+}
+
+func ParseClaims(seg string) (claims Claims, err error) {
+	segByte, err := base64.RawURLEncoding.DecodeString(seg)
+	if err != nil {
+		return claims, errors.New("decode segment failed")
+	}
+	if err := json.Unmarshal(segByte, &claims); err != nil {
+		return claims, errors.New("unmarshal json failed")
+	}
+	return claims, nil
+}
+
+// DecodeSegment decodes a JWT specific base64url encoding with padding stripped
+func DecodeSegment(seg string) ([]byte, error) {
+	return base64.RawURLEncoding.DecodeString(seg)
 }
