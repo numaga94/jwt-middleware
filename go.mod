@@ -1,5 +1,3 @@
-module github.com/23deg/jwt-middleware
+module github.com/numaga94/jwt-middleware
 
-go 1.14
-
-require github.com/golang-jwt/jwt/v4 v4.4.2
+go 1.18
